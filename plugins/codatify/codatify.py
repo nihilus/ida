@@ -1,6 +1,6 @@
 # IDA plugin that converts all data in data segments to defined data types, and all data in code segments to code.
 #
-# Use by going to Options->Define data and code, or use the Alt+3 hotkey.
+# Use by going to Options->Define data and code.
 #
 # Craig Heffner
 # Tactical Network Solutions
@@ -68,6 +68,8 @@ class Codatify(object):
 
         print "done."
 
+        self._fix_data_offsets()
+
     def pointify(self):
         counter = 0
 
@@ -89,6 +91,23 @@ class Codatify(object):
                     #    print "Failed to create name '%s'!" % new_name
 
         print "renamed %d pointers" % counter
+
+    def _fix_data_offsets(self):
+        ea = 0
+        count = 0
+
+        print "Fixing unresolved offset xrefs...",
+
+        while ea != idaapi.BADADDR:
+            (ea, n) = idaapi.find_notype(ea, idaapi.SEARCH_DOWN)
+            if idaapi.decode_insn(ea):
+                for i in range(0, len(idaapi.cmd.Operands)):
+                    op = idaapi.cmd.Operands[i]
+                    if op.type == idaapi.o_imm and idaapi.getseg(op.value):
+                        idaapi.add_dref(ea, op.value, (idaapi.dr_O | idaapi.XREF_USER))
+                        count += 1
+
+        print "created %d new data xrefs" % count
 
     # Creates functions and code blocks
     def codeify(self, ea=idc.BADADDR):
@@ -134,8 +153,8 @@ class codatify_t(idaapi.plugin_t):
     wanted_hotkey = ""
 
     def init(self):
-        self.menu_context = idaapi.add_menu_item("Options/", "Fixup code", "Alt-3", 0, self.fix_code, (None,))
-        self.menu_context = idaapi.add_menu_item("Options/", "Fixup data", "Alt-4", 0, self.fix_data, (None,))
+        self.menu_context = idaapi.add_menu_item("Options/", "Fixup code", "", 0, self.fix_code, (None,))
+        self.menu_context = idaapi.add_menu_item("Options/", "Fixup data", "", 0, self.fix_data, (None,))
         return idaapi.PLUGIN_KEEP
 
     def term(self):

@@ -16,35 +16,37 @@ class AlleyCatException(Exception):
 
 class AlleyCat(object):
     '''
-    Class which resolves function paths. This is where most of the work is done.
+    Class which resolves code paths. This is where most of the work is done.
     '''
 
-    def __init__(self, start_ea, end_ea):
+    def __init__(self, start, end):
         '''
         Class constructor.
 
-        @start_ea - An address in the head function.
-        @end_ea   - An address in the tail funciton.
+        @start - The start address.
+        @end   - The end address.
 
         Returns None.
         '''
         global ALLEYCAT_LIMIT
         self.limit = ALLEYCAT_LIMIT
-
         self.paths = []
 
         # We work backwards via xrefs, so we start at the end and end at the start
-        try:
-            start = idaapi.get_func(end_ea).startEA
-        except:
-            raise AlleyCatException("Address 0x%X is not part of a function!" % end)
-        try:
-            end = idaapi.get_func(start_ea).startEA
-        except:
-            end = idc.BADADDR
-
-        print "Generating call paths from %s to %s..." % (idc.Name(end), idc.Name(start))
+        print "Generating call paths from %s to %s..." % (self._name(end), self._name(start))
         self._build_paths(start, end)
+
+    def _name(self, ea):
+        name = idc.Name(ea)
+        if not name:
+            name = idc.GetFuncOffset(ea)
+            if not name:
+                name = '0x%X' % ea
+        return name
+
+    def _add_path(self, path):
+        if path not in self.paths:
+            self.paths.append(path)
 
     def _build_paths(self, start, end=idc.BADADDR):
         partial_paths = [[start]]
@@ -62,7 +64,7 @@ class AlleyCat(object):
             # exceeded ALLEYCAT_LIMIT.
             if len(partial_paths[0]) < self.limit:
                 for xref in idautils.XrefsTo(callee):
-                    caller = idaapi.get_func(xref.frm)
+                    caller = self._get_code_block(xref.frm)
                     if caller and caller.startEA not in callers:
                         callers.add(caller.startEA)
 
@@ -71,9 +73,14 @@ class AlleyCat(object):
             if callers:
                 base_path = partial_paths.pop(0)
                 for caller in callers:
+
+                    # Don't want to loop back on ourselves in the same path
+                    if caller in base_path:
+                        continue
+
                     # If we've reached the desired end node, don't go any further down this path
                     if caller == end:
-                        self.paths.append((base_path + [caller])[::-1])
+                        self._add_path((base_path + [caller])[::-1])
                     else:
                         partial_paths.append(base_path + [caller])
             # Else, our end node is not in this path, so don't include it in the finished path list.
@@ -83,7 +90,59 @@ class AlleyCat(object):
             # popped from the partial path list into the finished path list.
             elif end in partial_paths[0]:
                 # Paths start with the end function and end with the start function; reverse it.
-                self.paths.append(partial_paths.pop(0)[::-1])
+                self._add_path(partial_paths.pop(0)[::-1])
+
+class AlleyCatFunctionPaths(AlleyCat):
+
+    def __init__(self, start_ea, end_ea):
+
+        # We work backwards via xrefs, so we start at the end and end at the start
+        try:
+            start = idaapi.get_func(end_ea).startEA
+        except:
+            raise AlleyCatException("Address 0x%X is not part of a function!" % end_ea)
+        try:
+            end = idaapi.get_func(start_ea).startEA
+        except:
+            end = idc.BADADDR
+
+        super(AlleyCatFunctionPaths, self).__init__(start, end)
+
+    def _get_code_block(self, ea):
+        return idaapi.get_func(ea)
+
+class AlleyCatCodePaths(AlleyCat):
+
+    def __init__(self, start_ea, end_ea):
+        end_func = idaapi.get_func(end_ea)
+        start_func = idaapi.get_func(start_ea)
+
+        if not start_func:
+            raise AlleyCatException("Address 0x%X is not part of a function!" % start_ea)
+        if not end_func:
+            raise AlleyCatException("Address 0x%X is not part of a function!" % end_ea)
+        if start_func.startEA != end_func.startEA:
+            raise AlleyCatException("The start and end addresses are not part of the same function!")
+
+        self.func = start_func
+        self.blocks = [block for block in idaapi.FlowChart(self.func)]
+
+        # We work backwards via xrefs, so we start at the end and end at the start
+        end_block = self._get_code_block(start_ea)
+        start_block = self._get_code_block(end_ea)
+
+        if not end_block:
+            raise AlleyCatException("Failed to find the code block associated with address 0x%X" % start_ea)
+        if not start_block:
+            raise AlleyCatException("Failed to find the code block associated with address 0x%X" % end_ea)
+
+        super(AlleyCatCodePaths, self).__init__(start_block.startEA, end_block.startEA)
+
+    def _get_code_block(self, ea):
+        for block in self.blocks:
+            if block.startEA <= ea and block.endEA > ea:
+                return block
+        return None
 
 
 ### Everything below here is just IDA UI/Plugin stuff ###
@@ -188,16 +247,16 @@ class AlleyCatGraph(idaapi.GraphViewer):
         if not idaapi.GraphViewer.Show(self):
             return False
         else:
-            self.cmd_undo = self.AddCommand("Undo", "U")
-            self.cmd_redo = self.AddCommand("Redo", "R")
-            self.cmd_reset = self.AddCommand("Reset graph", "G")
-            self.cmd_exclude = self.AddCommand("Exclude node", "X")
-            self.cmd_include = self.AddCommand("Include node", "I")
+            self.cmd_undo = self.AddCommand("Undo", "")
+            self.cmd_redo = self.AddCommand("Redo", "")
+            self.cmd_reset = self.AddCommand("Reset graph", "")
+            self.cmd_exclude = self.AddCommand("Exclude node", "")
+            self.cmd_include = self.AddCommand("Include node", "")
             return True
 
     def OnRefresh(self):
         # Clear the graph before refreshing
-        self.Clear()
+        self.clear()
         self.nodes_ea2id = {}
         self.nodes_id2ea = {}
         self.edges = {}
@@ -239,6 +298,9 @@ class AlleyCatGraph(idaapi.GraphViewer):
                 parent_node = this_node
                 if not self.edges.has_key(parent_node):
                     self.edges[parent_node] = []
+
+                # Highlight this node in the disassembly window
+                self.highlight(ea)
 
             try:
                 # Track the first, last, and next to last nodes in each path for
@@ -335,6 +397,11 @@ class AlleyCatGraph(idaapi.GraphViewer):
         else:
             idc.Jump(node_ea)
 
+    def OnClose(self):
+        # TODO: Add a 'do not ask again' feature?
+        if idc.AskYN(1, "Path nodes have been highlighted in the disassembly window. Undo highlighting?") == 1:
+            self.unhighlight_all()
+
     def match_xref_source(self, xref, source):
         # TODO: This must be modified if support for graphing function blocks is added.
         return ((xref.type != idc.fl_F) and (idc.GetFunctionAttr(xref.frm, idc.FUNCATTR_START) == source))
@@ -367,6 +434,11 @@ class AlleyCatGraph(idaapi.GraphViewer):
 
         return ea
 
+    def clear(self):
+        # Clears the graph and unhighlights the disassembly
+        self.Clear()
+        self.unhighlight_all()
+
     def get_name_by_ea(self, ea):
         '''
         Get the name of the specified address.
@@ -381,6 +453,32 @@ class AlleyCatGraph(idaapi.GraphViewer):
             if not name:
                 name = "0x%X" % ea
         return name
+
+    def colorize_node(self, ea, color):
+        # Colorizes an entire code block
+        func = idaapi.get_func(ea)
+        if func:
+            for block in idaapi.FlowChart(func):
+                if block.startEA <= ea and block.endEA > ea:
+                    ea = block.startEA
+                    while ea < block.endEA:
+                        idaapi.set_item_color(ea, color)
+                        ea = idc.NextHead(ea)
+                    break
+
+    def highlight(self, ea):
+        # Highlights an entire code block
+        self.colorize_node(ea, 0x00FF00)
+
+    def unhighlight(self, ea):
+        # Unhighlights an entire code block
+        self.colorize_node(ea, idc.DEFCOLOR)
+
+    def unhighlight_all(self):
+        # Unhighlights all code blocks
+        for path in self.results:
+            for ea in path:
+                self.unhighlight(ea)
 
 class idapathfinder_t(idaapi.plugin_t):
 
@@ -397,15 +495,21 @@ class idapathfinder_t(idaapi.plugin_t):
 
         self.menu_contexts.append(idaapi.add_menu_item(ui_path,
                                 "Find paths to the current function from...",
-                                "Alt-6",
+                                "",
                                 0,
                                 self.FindPathsFromMany,
                                 (None,)))
         self.menu_contexts.append(idaapi.add_menu_item(ui_path,
                                 "Find paths from the current function to...",
-                                "Alt-5",
+                                "",
                                 0,
                                 self.FindPathsToMany,
+                                (None,)))
+        self.menu_contexts.append(idaapi.add_menu_item(ui_path,
+                                "Find paths in the current function to the current code block",
+                                "",
+                                0,
+                                self.FindPathsToCodeBlock,
                                 (None,)))
 
         return idaapi.PLUGIN_KEEP
@@ -421,13 +525,13 @@ class idapathfinder_t(idaapi.plugin_t):
     def _current_function(self):
         return idaapi.get_func(ScreenEA()).startEA
 
-    def _find_and_plot_paths(self, sources, targets):
+    def _find_and_plot_paths(self, sources, targets, klass=AlleyCatFunctionPaths):
         results = []
 
         for target in targets:
             for source in sources:
                 s = time.time()
-                r = AlleyCat(source, target).paths
+                r = klass(source, target).paths
                 e = time.time()
                 print "Found %d paths in %f seconds." % (len(r), (e-s))
 
@@ -474,6 +578,13 @@ class idapathfinder_t(idaapi.plugin_t):
                 break
 
         return functions
+
+    def FindPathsToCodeBlock(self, arg):
+        target = idc.ScreenEA()
+        source = self._current_function()
+
+        if source:
+            self._find_and_plot_paths([source], [target], klass=AlleyCatCodePaths)
 
     def FindPathsToMany(self, arg):
         source = self._current_function()
